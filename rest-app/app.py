@@ -1,121 +1,92 @@
-from flask import Flask, request, redirect, session, url_for
-from uuid import uuid4
-import requests
-import urllib
-import urlparse
+# TO DO
+#    [ ] encrypt the state to protect app secrets
+#    [ ] add logic to trim the session object when it gets too big before werkzeug crashes instead of
+#        clearing the session object on each run
+#    [ ] enable client secret between auth server and sa
 
-endpoint = {
-    'url': '',
-    'client_id': 'my_web_app',
-    'secret': '',  # TODO: assign secret to client in authorization server
-    'scope':  'patient/*.read'
+import pickle
+from flask import Flask, request, redirect, session, url_for
+from client import FHIRClient
+
+settings = {
+    'app_id': 'my_web_app',
+    'scope':  'patient/*.read',
+    'security_mode': None,
+    'secret': ''
 }
 
-application = app = Flask(
-    'wsgi',
-    template_folder='templates',
-    static_folder='static',
-    static_url_path='/static'
-)
+application = app = Flask('wsgi')
 app.debug = True
-app.secret_key = 'khsathdnsthjre'
-
-def getProvider (fhirServiceUrl):
-    res = {
-        'url': fhirServiceUrl,
-        'oauth2': {
-          'registration_uri': None,
-          'authorize_uri': None,
-          'token_uri': None
-        }
-    }
-
-    headers = {'Accept': 'application/json'}
-    url = fhirServiceUrl + '/metadata'
-    r = requests.get(url, headers=headers)
-    result = r.json()
-    
-    extensions = result['rest'][0]['security']['extension']
-    
-    for e in extensions:
-        if e['url'] == "http://fhir-registry.smartplatforms.org/Profile/oauth-uris#register":
-            res['oauth2']['registration_uri'] = e['valueUri']
-        elif e['url'] == "http://fhir-registry.smartplatforms.org/Profile/oauth-uris#authorize":
-            res['oauth2']['authorize_uri'] = e['valueUri']
-        elif e['url'] == "http://fhir-registry.smartplatforms.org/Profile/oauth-uris#token":
-            res['oauth2']['token_uri'] = e['valueUri']
-        
-    return res
+app.secret_key = 'khsathdnsthjre'  # CHANGE ME
 
 @app.route('/fhir-app/launch.html')
 def launch():
+    s = settings
+    api_base = None
+    security_mode = None
     iss = request.args.get('iss', '')
     fhirServiceUrl = request.args.get('fhirServiceUrl', '')
-    launch = request.args.get('launch', '')
-    endpoint['url'] = request.url.split('/fhir-app')[0] + url_for('index')
-    state = str(uuid4())
-    scope = ' '.join(( endpoint['scope'], ':'.join(( 'launch',launch )) ))
-    url = ''
-    params = {}
-
+    launch_token = request.args.get('launch', '')
+    app_url = request.url.split('/fhir-app')[0] + url_for('index')
+    
     if iss:
         # OAuth required
-        provider = getProvider(iss)
-        url = provider['oauth2']['authorize_uri']
-        params = {
-            'client_id': endpoint['client_id'],
-            'response_type': "code",
-            'scope': scope,
-            'redirect_uri': endpoint['url'],
-            'state': state
-        }
+        api_base = iss
+        security_mode = 'oauth'
     elif fhirServiceUrl:
         # no authorization required
-        url = endpoint['url']
-        params = {'state': state}
-
-    url_parts = list(urlparse.urlparse(url))
-    query = dict(urlparse.parse_qsl(url_parts[4]))
-    query.update(params)
-    url_parts[4] = urllib.urlencode(query)
-    url = urlparse.urlunparse(url_parts)
-
-    session[state] = {'provider': provider, 'client': endpoint}
+        api_base = fhirServiceUrl
     
-    return redirect(url)
+    client = FHIRClient (app_id=s['app_id'], app_url=app_url, api_base=api_base,
+                 scope=s['scope'], launch_token=launch_token, 
+                 security_mode=security_mode, secret=s['secret'])
+
+    session.clear()
+    state_id, state = client.state
+    session[state_id] = state
+    
+    if client.authorize_url:
+        return redirect(client.authorize_url)
+    else:
+        return redirect(app_url + "?state=" + state_id)
 
 @app.route('/fhir-app/')
 def index():
-    code = request.args.get('code', '')
-    state = request.args.get('state', '')
+    authorization_code = request.args.get('code', '')
+    state_id = request.args.get('state', '')
 
-    endpoint = session[state]['client']
-    provider = session[state]['provider']
-    
-    url = provider['oauth2']['token_uri']
-    auth=(endpoint['client_id'], endpoint['secret'])
-    params = {
-      'code': code,
-      'grant_type': 'authorization_code',
-      'redirect_uri': endpoint['url'],
-      'client_id': endpoint['client_id']
-    }
-    
-    r = requests.get(url, params=params, auth=auth)
-    res = r.json()
+    client = FHIRClient (state=session[state_id])
+    if not client.access_token and authorization_code:
+        client.update_access_token (authorization_code)
+        
+    session.clear()
+    state_id, state = client.state
+    session[state_id] = state
 
-    # TODO: this is probably insecure since Flask supposedly makes the session visible in a client cookie
-    # need to revisit...
-    #session[state]['context'] = res
+    out = """<!DOCTYPE html>
+        <html>
+          <head><title>Sample REST App</title></head>
+          <body>
+    """
     
-    url = session[state]['provider']['url'] + "/Patient/" + res['patient']
-    auth=(res['token_type'], res['access_token'])
-    # TODO: There may be a better way to specify non-basic authorization header in requests
-    headers = {'Authorization': res['token_type'] + " " + res['access_token'], 'Accept': 'application/json'}
-    r = requests.get(url, headers=headers)
-    res = r.json()
+    patient = client.Patient()
+    name = patient['name'][0]['given'][0] + " " + patient['name'][0]['family'][0] + " " + patient['birthDate']
+    out += "<h1>Medications for <span id='name'>%s</span></h1>\n" % name
+    out += "<ul id='med_list'>\n"
     
-    return res['name'][0]['given'][0] + " " + res['name'][0]['family'][0] + " " + res['birthDate']
+    prescriptions = client.MedicationPrescription()
+    
+    for prescription in prescriptions:
+        meds = prescription['contained']
+        for med in meds:
+            out += "<li>%s</li>" % med['name']
+    
+    out += """
+        </ul>
+       </body>
+      </html>"""
+    
+    return out
     
 if __name__ == '__main__':
     app.run(port=8000)
