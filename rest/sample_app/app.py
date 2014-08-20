@@ -7,7 +7,7 @@
 #    [ ] add configuration options and suggestions for session storage mechanism
 
 from flask import Flask, request, redirect, session, url_for
-from client import FHIRClient
+from fhir_client.client import FHIRClient
 
 settings = {
     'app_id': 'my_web_app',
