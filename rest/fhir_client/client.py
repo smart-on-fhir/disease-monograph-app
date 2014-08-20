@@ -80,8 +80,7 @@ class FHIRClient():
                 'client_id': c['app_id'],
                 'response_type': "code",
                 'scope': c['scope'],
-                'redirect_uri': c['app_url'],
-                'state': c['uuid']
+                'redirect_uri': c['app_url']
             }
             
             url_parts = list(urlparse.urlparse(url))
@@ -92,18 +91,17 @@ class FHIRClient():
 
     @property
     def authorize_url(self):
-        return self._settings['provider']['authorize_url']
+        c = self._settings['client']
+        p = self._settings['provider']
+        auth_url = p['authorize_url']
+        if auth_url:
+            return auth_url
+        else:
+            return  c['app_url']
         
     @property
     def state(self):
-        c = self._settings['client']
-        s = self._settings
-        return c['uuid'], s
-
-    @property
-    def access_token(self):
-        p = self._settings['provider']
-        return p['access_token']
+        return self._settings
         
     @property
     def patient_id(self):
