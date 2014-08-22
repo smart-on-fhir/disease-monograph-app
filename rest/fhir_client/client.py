@@ -154,6 +154,9 @@ class FHIRClient():
         r = requests.get(url, headers=headers)
         dt = r.json()
         res = []
-        for e in dt['entry']:
-            res.append(e['content'])
+        try:
+            for e in dt['entry']:
+                res.append(e['content'])
+        except:
+            pass
         return res
